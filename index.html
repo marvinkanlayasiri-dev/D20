@@ -55,6 +55,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 const TARGET_STREAK = 10;
 const ROLLS_PER_BATCH = 1_000_000; // 1M rolls per GPU dispatch
+const ROLLS_OFFSET = 8;            // bytes (seed + pad)
 
 ///////////////////////////////////////////////////////////////////////////////
 // STATE
@@ -66,20 +67,24 @@ let running = false;
 let currentStreak = 0;
 let bestStreak = 0;
 let totalRolls = 0;
+let batchSeed = 1;
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
 ///////////////////////////////////////////////////////////////////////////////
 // SHADER (WGSL)
+// We define a struct with explicit padding so the rolls array starts at offset 8
 ///////////////////////////////////////////////////////////////////////////////
 const shaderCode = /* wgsl */ `
 struct Data {
-  seed: atomic<u32>,
+  seed : u32,
+  _pad : u32,
   rolls: array<u32>,
 };
 
-@group(0) @binding(0) var<storage, read_write> data : Data;
+@group(0) @binding(0)
+var<storage, read_write> data : Data;
 
 fn lcg_rand(x : u32) -> u32 {
   return 1664525u * x + 1013904223u;
@@ -92,11 +97,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     return;
   }
 
-  let old = atomicAdd(&data.seed, 1u);
-  let r = lcg_rand(old ^ index);
-
-  // d20: 0–19 (we treat 19 as "20")
-  data.rolls[index] = r % 20u;
+  let r = lcg_rand(data.seed ^ index);
+  data.rolls[index] = r % 20u; // 0–19
 }
 `;
 
@@ -105,7 +107,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ///////////////////////////////////////////////////////////////////////////////
 async function initWebGPU() {
   if (!("gpu" in navigator)) {
-    statsDiv.textContent = "❌ WebGPU not supported on this device.\nUse desktop Chrome/Edge.";
+    statsDiv.textContent = "❌ WebGPU not supported.\nUse desktop Chrome/Edge.";
     return;
   }
 
@@ -128,8 +130,8 @@ async function initWebGPU() {
     }
   });
 
-  // buffer: first 4 bytes = seed, then ROLLS_PER_BATCH * 4 bytes of u32
-  const bufferSize = 4 + ROLLS_PER_BATCH * 4;
+  // buffer size: 8 bytes header (seed + pad) + rolls
+  const bufferSize = ROLLS_OFFSET + ROLLS_PER_BATCH * 4;
   storageBuffer = device.createBuffer({
     size: bufferSize,
     usage: GPUBufferUsage.STORAGE |
@@ -137,9 +139,8 @@ async function initWebGPU() {
            GPUBufferUsage.COPY_DST
   });
 
-  // init seed
-  const seed = new Uint32Array([Date.now() & 0xffffffff]);
-  queue.writeBuffer(storageBuffer, 0, seed);
+  // init seed (not atomic, just per-batch)
+  queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
 
   bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -158,6 +159,10 @@ async function initWebGPU() {
 async function runOneBatch() {
   if (!running) return;
 
+  // write a new seed for this batch
+  batchSeed = (batchSeed + 1) >>> 0;
+  queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
+
   const tStart = performance.now();
 
   // --- 1) Run compute shader to fill rolls buffer ---
@@ -174,7 +179,7 @@ async function runOneBatch() {
   queue.submit([encoder.finish()]);
   await queue.onSubmittedWorkDone();
 
-  // --- 2) Copy GPU buffer to a CPU-readable buffer ---
+  // --- 2) Copy GPU buffer (rolls part) to CPU-readable buffer ---
   const readBuffer = device.createBuffer({
     size: ROLLS_PER_BATCH * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
@@ -183,7 +188,7 @@ async function runOneBatch() {
   const copyEncoder = device.createCommandEncoder();
   copyEncoder.copyBufferToBuffer(
     storageBuffer,
-    4,                // skip seed
+    ROLLS_OFFSET,           // skip seed + pad
     readBuffer,
     0,
     ROLLS_PER_BATCH * 4
@@ -201,7 +206,6 @@ async function runOneBatch() {
   for (let i = 0; i < rolls.length; i++) {
     const v = rolls[i]; // 0–19
 
-    // update streak
     if (v === 19) {
       currentStreak++;
     } else {
@@ -217,14 +221,14 @@ async function runOneBatch() {
 
     if (currentStreak >= TARGET_STREAK) {
       found = true;
-      break;
+      // we do NOT break, so we finish the batch cleanly
     }
   }
 
   readBuffer.unmap();
 
   const tEnd = performance.now();
-  const dt = (tEnd - tStart) / 1000; // seconds for GPU + transfer + CPU loop
+  const dt = (tEnd - tStart) / 1000; // seconds for this whole batch
   const rps = Math.round(processed / dt);
 
   statsDiv.textContent =
@@ -244,9 +248,8 @@ async function runOneBatch() {
     return;
   }
 
-  // --- 4) Schedule next batch if still running ---
   if (running) {
-    // let the event loop breathe a tiny bit
+    // small yield so browser stays happy
     setTimeout(runOneBatch, 0);
   }
 }
@@ -261,6 +264,7 @@ startBtn.addEventListener("click", () => {
   currentStreak = 0;
   bestStreak = 0;
   totalRolls = 0;
+  batchSeed = 1;
   running = true;
 
   statsDiv.textContent = "Starting GPU batches…";
