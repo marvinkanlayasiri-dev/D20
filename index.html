@@ -74,101 +74,101 @@
   </div>
 
   <script>
-    const TARGET_STREAK = 10;
-    const BATCH_SIZE = 500000;
+const TARGET_STREAK = 10;
 
-    let streak = 0;
-    let bestStreak = 0;
-    let totalRolls = 0;
-    let running = false;
+// Larger batch = more speed (realistic max for iPad Air M2: 750k–1M)
+const BATCH_SIZE = 900000;  
 
-    let lastTime = 0;
-    let lastRollCount = 0;
-    const UPDATE_INTERVAL_MS = 500;
+// STATE
+let streak = 0;
+let bestStreak = 0;
+let totalRolls = 0;
+let running = false;
 
-    const statsDiv = document.getElementById("stats");
-    const startBtn = document.getElementById("startBtn");
+// Stats timing
+let lastTime = 0;
+let lastRollCount = 0;
+const UPDATE_INTERVAL_MS = 700;  // update UI ~1.4 times per sec for speed
 
-    function d20() { 
-      return (Math.random() * 20) | 0; 
+const statsDiv = document.getElementById("stats");
+const startBtn = document.getElementById("startBtn");
+
+// FAST RNG: 0–19
+function d20() { 
+  return (Math.random() * 20) | 0; 
+}
+
+function printStats(now) {
+  const dt = (now - lastTime) / 1000;
+  if (dt <= 0) return;
+
+  const rollsSince = totalRolls - lastRollCount;
+  const realRPS = rollsSince / dt;
+
+  statsDiv.textContent =
+    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+    "Speed (real): " + Math.round(realRPS).toLocaleString("en-US") + " / sec\n" +
+    "Current streak: " + streak + "\n" +
+    "Best streak: " + bestStreak;
+
+  lastTime = now;
+  lastRollCount = totalRolls;
+}
+
+function loop(now) {
+  if (!running) return;
+
+  let n = BATCH_SIZE;
+  while (n--) {
+    totalRolls++;
+
+    streak = (d20() === 19) ? (streak + 1) : 0;
+
+    if (streak > bestStreak)
+      bestStreak = streak;
+
+    if (streak >= TARGET_STREAK) {
+      running = false;
+
+      try { navigator.vibrate([200, 100, 200, 100, 300]); } catch (e) {}
+
+      alert(
+        "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
+        "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+        "Best streak: " + bestStreak
+      );
+
+      printStats(performance.now());
+      startBtn.disabled = false;
+      startBtn.textContent = "Start Again";
+      return;
     }
+  }
 
-    function formatNumber(n) {
-      return n.toLocaleString("en-US");
-    }
+  if (now - lastTime >= UPDATE_INTERVAL_MS) {
+    printStats(now);
+  }
 
-    function updateStats(now) {
-      const dt = (now - lastTime) / 1000;
-      if (dt <= 0) return;
+  requestAnimationFrame(loop);
+}
 
-      const rollsSince = totalRolls - lastRollCount;
-      const rps = rollsSince / dt;
+startBtn.addEventListener("click", () => {
+  if (running) return;
 
-      statsDiv.textContent =
-        "Total rolls: " + formatNumber(totalRolls) + "\n" +
-        "Speed: " + formatNumber(Math.round(rps)) + " rolls/sec\n" +
-        "Current streak: " + streak + "\n" +
-        "Best streak: " + bestStreak;
+  streak = 0;
+  bestStreak = 0;
+  totalRolls = 0;
+  lastRollCount = 0;
+  lastTime = performance.now();
+  running = true;
 
-      lastTime = now;
-      lastRollCount = totalRolls;
-    }
+  startBtn.disabled = true;
+  startBtn.textContent = "Running…";
 
-    function loop(now) {
-      if (!running) return;
+  statsDiv.textContent = "Starting…";
 
-      let n = BATCH_SIZE;
-      while (n--) {
-        totalRolls++;
-        streak = (d20() === 19) ? (streak + 1) : 0;
-
-        if (streak > bestStreak) bestStreak = streak;
-
-        if (streak >= TARGET_STREAK) {
-          running = false;
-          try { navigator.vibrate([200,100,200,100,300]); } catch(e){}
-          alert(
-            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
-            "Total rolls: " + formatNumber(totalRolls) + "\n" +
-            "Best streak: " + bestStreak
-          );
-          updateStats(performance.now());
-          startBtn.disabled = false;
-          startBtn.textContent = "Start Again";
-          return;
-        }
-      }
-
-      if (now - lastTime >= UPDATE_INTERVAL_MS) {
-        updateStats(now);
-      }
-
-      requestAnimationFrame(loop);
-    }
-
-    startBtn.addEventListener("click", () => {
-      if (running) return;
-
-      streak = 0;
-      bestStreak = 0;
-      totalRolls = 0;
-      lastRollCount = 0;
-      lastTime = performance.now();
-      running = true;
-
-      startBtn.disabled = true;
-      startBtn.textContent = "Running…";
-
-      statsDiv.textContent = "Starting…";
-
-      requestAnimationFrame(loop);
-    });
-
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("sw.js");
-      });
-    }
-  </script>
+  requestAnimationFrame(loop);
+});
+</script>
 </body>
 </html>
