@@ -2,16 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>D20 Streak Hunter</title>
+  <title>D20 GPU Streak Hunter</title>
 
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <link rel="manifest" href="manifest.json" />
-
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="D20 Streak" />
-
-  <link rel="apple-touch-icon" href="icon-192.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <style>
     html, body {
@@ -20,34 +13,20 @@
       height: 100%;
       background: #000;
       color: #0f0;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    }
-    .app {
-      box-sizing: border-box;
-      padding: 20px;
-      height: 100%;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
       text-align: center;
     }
-    h1 {
-      margin-bottom: 0.5rem;
-      font-size: 1.8rem;
-    }
+
     #stats {
-      font-size: 1rem;
-      line-height: 1.6;
-      margin-top: 1rem;
       white-space: pre-line;
+      line-height: 1.6;
+      font-size: 1rem;
     }
-    .small {
-      margin-top: 1.5rem;
-      font-size: 0.75rem;
-      color: #7f7;
-      opacity: 0.7;
-    }
+
     button {
       margin-top: 1.5rem;
       padding: 0.6rem 1rem;
@@ -55,120 +34,179 @@
       border: 1px solid #0f0;
       background: #020;
       color: #0f0;
-      font-size: 0.9rem;
+      font-size: 1rem;
     }
+
     button:active {
       background: #040;
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <h1>D20 Streak Hunter</h1>
-    <div id="stats">Tap "Start" to begin</div>
-    <button id="startBtn">Start Rolling</button>
-    <div class="small">
-      Target: 10 rolls of 20 in a row<br />
-      Leave the app open for max speed.
-    </div>
-  </div>
+  <h1>D20 GPU Streak Hunter</h1>
+  <div id="stats">Checking WebGPU support…</div>
+  <button id="startBtn" disabled>Start GPU Rolling</button>
 
-  <script>
+<script type="module">
 const TARGET_STREAK = 10;
+const ROLLS_PER_DISPATCH = 1_000_000;   // 1M GPU rolls per batch
 
-// Larger batch = more speed (realistic max for iPad Air M2: 750k–1M)
-const BATCH_SIZE = 900000;  
-
-// STATE
+let device, queue, pipeline, bindGroup, storageBuffer;
 let streak = 0;
 let bestStreak = 0;
 let totalRolls = 0;
 let running = false;
 
-// Stats timing
-let lastTime = 0;
-let lastRollCount = 0;
-const UPDATE_INTERVAL_MS = 700;  // update UI ~1.4 times per sec for speed
-
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
-// FAST RNG: 0–19
-function d20() { 
-  return (Math.random() * 20) | 0; 
+// WGSL compute shader: fast RNG
+const shaderCode = `
+struct Data {
+  seed: atomic<u32>,
+  rolls: array<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> data : Data;
+
+// Simple LCG RNG (fast, not cryptographically secure)
+fn lcg_rand(x : u32) -> u32 {
+  return 1664525u * x + 1013904223u;
 }
 
-function printStats(now) {
-  const dt = (now - lastTime) / 1000;
-  if (dt <= 0) return;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let index = gid.x;
+  if (index >= ${ROLLS_PER_DISPATCH}u) { return; }
 
-  const rollsSince = totalRolls - lastRollCount;
-  const realRPS = rollsSince / dt;
+  let old = atomicAdd(&data.seed, 1u);
+  let r = lcg_rand(old ^ index);
+  data.rolls[index] = r % 20u; // 0–19
+}
+`;
 
-  statsDiv.textContent =
-    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
-    "Speed (real): " + Math.round(realRPS).toLocaleString("en-US") + " / sec\n" +
-    "Current streak: " + streak + "\n" +
-    "Best streak: " + bestStreak;
+async function initWebGPU() {
+  if (!("gpu" in navigator)) {
+    statsDiv.textContent = "❌ WebGPU not supported on this device.\nUse Chrome/Edge on desktop.";
+    return;
+  }
 
-  lastTime = now;
-  lastRollCount = totalRolls;
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    statsDiv.textContent = "❌ No GPU adapter available.";
+    return;
+  }
+
+  device = await adapter.requestDevice();
+  queue = device.queue;
+
+  const module = device.createShaderModule({ code: shaderCode });
+
+  pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module, entryPoint: "main" }
+  });
+
+  const bufferSize = 4 + ROLLS_PER_DISPATCH * 4; // seed + array
+  storageBuffer = device.createBuffer({
+    size: bufferSize,
+    usage: GPUBufferUsage.STORAGE |
+           GPUBufferUsage.COPY_SRC |
+           GPUBufferUsage.COPY_DST
+  });
+
+  // Initialize seed
+  const seed = new Uint32Array([ Date.now() & 0xffffffff ]);
+  queue.writeBuffer(storageBuffer, 0, seed);
+
+  bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: storageBuffer } }]
+  });
+
+  statsDiv.textContent = "WebGPU Ready.\nPress Start to begin.";
+  startBtn.disabled = false;
 }
 
-function loop(now) {
-  if (!running) return;
+async function gpuRollBatch() {
+  // Encode GPU commands
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
 
-  let n = BATCH_SIZE;
-  while (n--) {
+  const WGS = 256;
+  pass.dispatchWorkgroups(Math.ceil(ROLLS_PER_DISPATCH / WGS));
+  pass.end();
+  queue.submit([encoder.finish()]);
+  await queue.onSubmittedWorkDone();
+
+  // Read back results
+  const readBuffer = device.createBuffer({
+    size: ROLLS_PER_DISPATCH * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+
+  const copyEncoder = device.createCommandEncoder();
+  copyEncoder.copyBufferToBuffer(storageBuffer, 4, readBuffer, 0, ROLLS_PER_DISPATCH * 4);
+  queue.submit([copyEncoder.finish()]);
+
+  await readBuffer.mapAsync(GPUMapMode.READ);
+  const array = new Uint32Array(readBuffer.getMappedRange());
+
+  // CPU process the rolls
+  const t0 = performance.now();
+  for (let i = 0; i < array.length; i++) {
     totalRolls++;
+    if (array[i] === 19) streak++;
+    else streak = 0;
 
-    streak = (d20() === 19) ? (streak + 1) : 0;
-
-    if (streak > bestStreak)
-      bestStreak = streak;
+    if (streak > bestStreak) bestStreak = streak;
 
     if (streak >= TARGET_STREAK) {
       running = false;
-
-      try { navigator.vibrate([200, 100, 200, 100, 300]); } catch (e) {}
-
       alert(
-        "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
-        "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
-        "Best streak: " + bestStreak
+        `🎉 HIT ${TARGET_STREAK} twenties in a row!\n` +
+        `Total rolls: ${totalRolls.toLocaleString()}\n` +
+        `Best streak: ${bestStreak}`
       );
-
-      printStats(performance.now());
-      startBtn.disabled = false;
-      startBtn.textContent = "Start Again";
-      return;
+      break;
     }
   }
+  const t1 = performance.now();
 
-  if (now - lastTime >= UPDATE_INTERVAL_MS) {
-    printStats(now);
-  }
+  const dt = (t1 - t0) / 1000;
+  const rps = Math.round(ROLLS_PER_DISPATCH / dt);
 
-  requestAnimationFrame(loop);
+  statsDiv.textContent =
+    `Total rolls: ${totalRolls.toLocaleString()}\n` +
+    `Batch: ${ROLLS_PER_DISPATCH.toLocaleString()} rolls\n` +
+    `Speed: ${rps.toLocaleString()} rolls/sec (GPU)\n` +
+    `Current streak: ${streak}\n` +
+    `Best streak: ${bestStreak}`;
+
+  readBuffer.unmap();
+
+  if (running) gpuRollBatch();
 }
 
 startBtn.addEventListener("click", () => {
   if (running) return;
+  running = true;
 
   streak = 0;
   bestStreak = 0;
   totalRolls = 0;
-  lastRollCount = 0;
-  lastTime = performance.now();
-  running = true;
-
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  statsDiv.textContent = "Starting…";
-
-  requestAnimationFrame(loop);
+  gpuRollBatch().finally(() => {
+    startBtn.disabled = false;
+    startBtn.textContent = "Start GPU Rolling";
+  });
 });
+
+initWebGPU();
 </script>
 </body>
 </html>
