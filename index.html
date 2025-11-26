@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>D20 Streak Hunter</title>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <link rel="manifest" href="manifest.json" />
+
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="D20 Streak" />
+
+  <link rel="apple-touch-icon" href="icon-192.png" />
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #000;
+      color: #0f0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    }
+    .app {
+      box-sizing: border-box;
+      padding: 20px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+    h1 {
+      margin-bottom: 0.5rem;
+      font-size: 1.8rem;
+    }
+    #stats {
+      font-size: 1rem;
+      line-height: 1.6;
+      margin-top: 1rem;
+      white-space: pre-line;
+    }
+    .small {
+      margin-top: 1.5rem;
+      font-size: 0.75rem;
+      color: #7f7;
+      opacity: 0.7;
+    }
+    button {
+      margin-top: 1.5rem;
+      padding: 0.6rem 1rem;
+      border-radius: 8px;
+      border: 1px solid #0f0;
+      background: #020;
+      color: #0f0;
+      font-size: 0.9rem;
+    }
+    button:active {
+      background: #040;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>D20 Streak Hunter</h1>
+    <div id="stats">Tap "Start" to begin</div>
+    <button id="startBtn">Start Rolling</button>
+    <div class="small">
+      Target: 10 rolls of 20 in a row<br />
+      Leave the app open for max speed.
+    </div>
+  </div>
+
+  <script>
+    const TARGET_STREAK = 10;
+    const BATCH_SIZE = 500000;
+
+    let streak = 0;
+    let bestStreak = 0;
+    let totalRolls = 0;
+    let running = false;
+
+    let lastTime = 0;
+    let lastRollCount = 0;
+    const UPDATE_INTERVAL_MS = 500;
+
+    const statsDiv = document.getElementById("stats");
+    const startBtn = document.getElementById("startBtn");
+
+    function d20() { 
+      return (Math.random() * 20) | 0; 
+    }
+
+    function formatNumber(n) {
+      return n.toLocaleString("en-US");
+    }
+
+    function updateStats(now) {
+      const dt = (now - lastTime) / 1000;
+      if (dt <= 0) return;
+
+      const rollsSince = totalRolls - lastRollCount;
+      const rps = rollsSince / dt;
+
+      statsDiv.textContent =
+        "Total rolls: " + formatNumber(totalRolls) + "\n" +
+        "Speed: " + formatNumber(Math.round(rps)) + " rolls/sec\n" +
+        "Current streak: " + streak + "\n" +
+        "Best streak: " + bestStreak;
+
+      lastTime = now;
+      lastRollCount = totalRolls;
+    }
+
+    function loop(now) {
+      if (!running) return;
+
+      let n = BATCH_SIZE;
+      while (n--) {
+        totalRolls++;
+        streak = (d20() === 19) ? (streak + 1) : 0;
+
+        if (streak > bestStreak) bestStreak = streak;
+
+        if (streak >= TARGET_STREAK) {
+          running = false;
+          try { navigator.vibrate([200,100,200,100,300]); } catch(e){}
+          alert(
+            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
+            "Total rolls: " + formatNumber(totalRolls) + "\n" +
+            "Best streak: " + bestStreak
+          );
+          updateStats(performance.now());
+          startBtn.disabled = false;
+          startBtn.textContent = "Start Again";
+          return;
+        }
+      }
+
+      if (now - lastTime >= UPDATE_INTERVAL_MS) {
+        updateStats(now);
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    startBtn.addEventListener("click", () => {
+      if (running) return;
+
+      streak = 0;
+      bestStreak = 0;
+      totalRolls = 0;
+      lastRollCount = 0;
+      lastTime = performance.now();
+      running = true;
+
+      startBtn.disabled = true;
+      startBtn.textContent = "Running…";
+
+      statsDiv.textContent = "Starting…";
+
+      requestAnimationFrame(loop);
+    });
+
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js");
+      });
+    }
+  </script>
+</body>
+</html>
