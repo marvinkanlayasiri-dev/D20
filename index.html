@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>D20 GPU Streak Hunter</title>
+  <title>D20 GPU Streak Hunter (Fixed)</title>
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
@@ -48,19 +48,27 @@
   <button id="startBtn" disabled>Start GPU Rolling</button>
 
 <script type="module">
+////////////////////////////////////////////////////////////////////////////////
+// CONFIG
+////////////////////////////////////////////////////////////////////////////////
 const TARGET_STREAK = 10;
-const ROLLS_PER_DISPATCH = 1_000_000;   // 1M GPU rolls per batch
+const ROLLS_PER_DISPATCH = 1_000_000;  // 1M per GPU batch
 
+////////////////////////////////////////////////////////////////////////////////
+// PAGE STATE
+////////////////////////////////////////////////////////////////////////////////
 let device, queue, pipeline, bindGroup, storageBuffer;
-let streak = 0;
-let bestStreak = 0;
-let totalRolls = 0;
+let streak = 0;       // carry-over streak across batches
+let bestStreak = 0;   // longest streak found
+let totalRolls = 0;   // number of rolls processed
 let running = false;
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
-// WGSL compute shader: fast RNG
+////////////////////////////////////////////////////////////////////////////////
+// GPU SHADER
+////////////////////////////////////////////////////////////////////////////////
 const shaderCode = `
 struct Data {
   seed: atomic<u32>,
@@ -69,7 +77,6 @@ struct Data {
 
 @group(0) @binding(0) var<storage, read_write> data : Data;
 
-// Simple LCG RNG (fast, not cryptographically secure)
 fn lcg_rand(x : u32) -> u32 {
   return 1664525u * x + 1013904223u;
 }
@@ -81,13 +88,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   let old = atomicAdd(&data.seed, 1u);
   let r = lcg_rand(old ^ index);
-  data.rolls[index] = r % 20u; // 0–19
+  data.rolls[index] = r % 20u;
 }
 `;
 
+////////////////////////////////////////////////////////////////////////////////
+// INIT WEBGPU
+////////////////////////////////////////////////////////////////////////////////
 async function initWebGPU() {
   if (!("gpu" in navigator)) {
-    statsDiv.textContent = "❌ WebGPU not supported on this device.\nUse Chrome/Edge on desktop.";
+    statsDiv.textContent = "❌ WebGPU not supported.\nUse Chrome/Edge on desktop.";
     return;
   }
 
@@ -101,13 +111,12 @@ async function initWebGPU() {
   queue = device.queue;
 
   const module = device.createShaderModule({ code: shaderCode });
-
   pipeline = device.createComputePipeline({
     layout: "auto",
     compute: { module, entryPoint: "main" }
   });
 
-  const bufferSize = 4 + ROLLS_PER_DISPATCH * 4; // seed + array
+  const bufferSize = 4 + ROLLS_PER_DISPATCH * 4;
   storageBuffer = device.createBuffer({
     size: bufferSize,
     usage: GPUBufferUsage.STORAGE |
@@ -115,21 +124,28 @@ async function initWebGPU() {
            GPUBufferUsage.COPY_DST
   });
 
-  // Initialize seed
-  const seed = new Uint32Array([ Date.now() & 0xffffffff ]);
-  queue.writeBuffer(storageBuffer, 0, seed);
+  // initialize seed
+  queue.writeBuffer(storageBuffer, 0, new Uint32Array([Date.now()]));
 
   bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: storageBuffer } }]
   });
 
-  statsDiv.textContent = "WebGPU Ready.\nPress Start to begin.";
+  statsDiv.textContent = "WebGPU detected.\nPress Start.";
   startBtn.disabled = false;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// GPU ROLL LOOP
+////////////////////////////////////////////////////////////////////////////////
 async function gpuRollBatch() {
-  // Encode GPU commands
+  if (!running) return;
+
+  // TIME GPU COMPUTE ONLY — REAL SPEED
+  const gpuStart = performance.now();
+
+  // run compute shader
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
@@ -141,7 +157,10 @@ async function gpuRollBatch() {
   queue.submit([encoder.finish()]);
   await queue.onSubmittedWorkDone();
 
-  // Read back results
+  const gpuEnd = performance.now();
+  const gpuSec = (gpuEnd - gpuStart) / 1000;
+
+  // read results
   const readBuffer = device.createBuffer({
     size: ROLLS_PER_DISPATCH * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
@@ -150,53 +169,54 @@ async function gpuRollBatch() {
   const copyEncoder = device.createCommandEncoder();
   copyEncoder.copyBufferToBuffer(storageBuffer, 4, readBuffer, 0, ROLLS_PER_DISPATCH * 4);
   queue.submit([copyEncoder.finish()]);
-
   await readBuffer.mapAsync(GPUMapMode.READ);
-  const array = new Uint32Array(readBuffer.getMappedRange());
 
-  // CPU process the rolls
-  const t0 = performance.now();
-  for (let i = 0; i < array.length; i++) {
+  // process rolls WITH STREAK CARRY-OVER FIX
+  const rolls = new Uint32Array(readBuffer.getMappedRange());
+  for (let i = 0; i < rolls.length; i++) {
     totalRolls++;
-    if (array[i] === 19) streak++;
-    else streak = 0;
 
-    if (streak > bestStreak) bestStreak = streak;
+    if (rolls[i] === 19) {
+      streak++;
+    } else {
+      streak = 0;
+    }
+
+    if (streak > bestStreak)
+      bestStreak = streak;
 
     if (streak >= TARGET_STREAK) {
       running = false;
-      alert(
-        `🎉 HIT ${TARGET_STREAK} twenties in a row!\n` +
-        `Total rolls: ${totalRolls.toLocaleString()}\n` +
-        `Best streak: ${bestStreak}`
-      );
+      alert(`🎉 HIT ${TARGET_STREAK} twenties!\nTotal rolls: ${totalRolls.toLocaleString()}`);
       break;
     }
   }
-  const t1 = performance.now();
 
-  const dt = (t1 - t0) / 1000;
-  const rps = Math.round(ROLLS_PER_DISPATCH / dt);
+  readBuffer.unmap();
+
+  // REAL GPU SPEED
+  const realRPS = Math.round(ROLLS_PER_DISPATCH / gpuSec);
 
   statsDiv.textContent =
     `Total rolls: ${totalRolls.toLocaleString()}\n` +
-    `Batch: ${ROLLS_PER_DISPATCH.toLocaleString()} rolls\n` +
-    `Speed: ${rps.toLocaleString()} rolls/sec (GPU)\n` +
+    `GPU speed: ${realRPS.toLocaleString()} sec\n` +
     `Current streak: ${streak}\n` +
     `Best streak: ${bestStreak}`;
-
-  readBuffer.unmap();
 
   if (running) gpuRollBatch();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// BUTTON
+////////////////////////////////////////////////////////////////////////////////
 startBtn.addEventListener("click", () => {
   if (running) return;
-  running = true;
 
   streak = 0;
   bestStreak = 0;
   totalRolls = 0;
+  running = true;
+
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
@@ -206,6 +226,9 @@ startBtn.addEventListener("click", () => {
   });
 });
 
+////////////////////////////////////////////////////////////////////////////////
+// START
+////////////////////////////////////////////////////////////////////////////////
 initWebGPU();
 </script>
 </body>
