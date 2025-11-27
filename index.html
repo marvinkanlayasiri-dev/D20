@@ -1,33 +1,34 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>D20 Multi-Core Streak Hunter (Turbo)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <title>D20 Multi-Core Streak Hunter</title>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <style>
     html, body {
       margin: 0;
       padding: 0;
+      height: 100%;
       background: #000;
       color: #0f0;
-      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-      height: 100%;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
       text-align: center;
     }
     #stats {
-      margin-top: 12px;
       white-space: pre-line;
-      font-size: 0.95rem;
-      line-height: 1.5;
+      line-height: 1.6;
+      font-size: 1rem;
+      margin-top: 0.5rem;
     }
     button {
-      margin-top: 20px;
-      padding: 10px 16px;
+      margin-top: 1.5rem;
+      padding: 0.6rem 1rem;
       border-radius: 8px;
       border: 1px solid #0f0;
       background: #020;
@@ -39,66 +40,45 @@
   </style>
 </head>
 <body>
-
-<h1>D20 Multi-Core Streak Hunter (Turbo)</h1>
-<div id="stats">Ready.</div>
-<button id="startBtn">Start Rolling</button>
+  <h1>D20 Multi-Core Streak Hunter</h1>
+  <div id="stats">Ready.</div>
+  <button id="startBtn">Start Rolling</button>
 
 <script>
-///////////////////////////////////////////////////////////////////////////////
-// CONFIG
-///////////////////////////////////////////////////////////////////////////////
-
-// Target streak (10 twenties in a row)
 const TARGET_STREAK = 10;
+const WORKER_COUNT = 4;      // Try 2–4 depending on how hot your laptop gets
+const UPDATE_INTERVAL_MS = 1000; // update stats ~1×/sec
 
-// Number of workers (CPU cores). Try 2–4 on an older laptop.
-// 4 = more speed but more heat / more chance for browser to throttle.
-const WORKERS = 4;
-
-// How often to update UI (ms)
-const UPDATE_MS = 1000;
-
-///////////////////////////////////////////////////////////////////////////////
-// STATE
-///////////////////////////////////////////////////////////////////////////////
 let workers = [];
 let running = false;
 
 let totalRolls = 0;
 let bestStreak = 0;
 
+// for real speed calculation
+let lastTime = 0;
 let lastRolls = 0;
-let lastUpdate = 0;
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
-///////////////////////////////////////////////////////////////////////////////
-// WORKER SETUP
-///////////////////////////////////////////////////////////////////////////////
 function setupWorkers() {
-  // Kill any previous workers
-  for (const w of workers) {
-    try { w.terminate(); } catch (e) {}
-  }
+  // Kill old workers if any
+  workers.forEach(w => w.terminate());
   workers = [];
 
-  for (let i = 0; i < WORKERS; i++) {
+  for (let i = 0; i < WORKER_COUNT; i++) {
     const w = new Worker("worker.js");
-
     w.onmessage = (e) => {
       const msg = e.data;
 
       if (msg.type === "progress") {
+        // Add this worker's delta
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
           bestStreak = msg.bestStreak;
         }
-        return;
-      }
-
-      if (msg.type === "hit") {
+      } else if (msg.type === "hit") {
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
           bestStreak = msg.bestStreak;
@@ -106,51 +86,46 @@ function setupWorkers() {
 
         if (running) {
           running = false;
-          // Stop all workers
-          for (const other of workers) {
+          // Tell all workers to stop
+          workers.forEach(other => {
             try { other.postMessage({ type: "stop" }); } catch (e) {}
-          }
+          });
 
           alert(
             "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
-            "Total rolls (approx): " + totalRolls + "\n" +
+            "Total rolls (approx): " + totalRolls.toLocaleString() + "\n" +
             "Best streak: " + bestStreak
           );
 
+          // Final stats update
           updateStats(performance.now());
+
           startBtn.disabled = false;
           startBtn.textContent = "Start Again";
         }
       }
     };
-
     workers.push(w);
   }
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// UI STATS
-///////////////////////////////////////////////////////////////////////////////
 function updateStats(now) {
-  const dt = (now - lastUpdate) / 1000;
+  const dt = (now - lastTime) / 1000;
   if (dt <= 0) return;
 
   const deltaRolls = totalRolls - lastRolls;
   const rps = deltaRolls / dt;
 
-  lastRolls = totalRolls;
-  lastUpdate = now;
-
   statsDiv.textContent =
-    "Total rolls: " + totalRolls + "\n" +
-    "Speed: " + Math.round(rps) + " rolls/sec\n" +
+    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+    "Speed (real, all cores): " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
     "Best streak: " + bestStreak + "\n" +
-    "(Workers: " + WORKERS + ")";
+    "(Workers: " + WORKER_COUNT + ")";
+
+  lastTime = now;
+  lastRolls = totalRolls;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// MAIN LOOP
-///////////////////////////////////////////////////////////////////////////////
 function startRolling() {
   if (running) return;
 
@@ -159,25 +134,25 @@ function startRolling() {
   totalRolls = 0;
   bestStreak = 0;
   lastRolls = 0;
-  lastUpdate = performance.now();
+  lastTime = performance.now();
   running = true;
 
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  // Start all workers
-  for (const w of workers) {
-    w.postMessage({ type: "start" });
-  }
+  statsDiv.textContent = "Starting workers…";
 
-  // UI loop – light so browser doesn't freak out
-  (function loop() {
+  // Start workers
+  workers.forEach(w => w.postMessage({ type: "start" }));
+
+  // Stats loop on main thread
+  (function statsLoop() {
     if (!running) return;
     const now = performance.now();
-    if (now - lastUpdate >= UPDATE_MS) {
+    if (now - lastTime >= UPDATE_INTERVAL_MS) {
       updateStats(now);
     }
-    requestAnimationFrame(loop);
+    requestAnimationFrame(statsLoop);
   })();
 }
 
