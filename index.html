@@ -2,51 +2,45 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>D20 Multi-Core Streak Hunter</title>
+  <title>D20 Multi-Core Streak Hunter (Turbo)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    background: #000;
-    color: #0f0;
-    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-
-  #stats {
-    margin-top: 12px;
-    white-space: pre-line;
-    font-size: 0.95rem;
-    line-height: 1.5;
-  }
-
-  button {
-    margin-top: 20px;
-    padding: 10px 16px;
-    border-radius: 8px;
-    border: 1px solid #0f0;
-    background: #020;
-    color: #0f0;
-    font-size: 1rem;
-    cursor: pointer;
-  }
-
-  button:active {
-    background: #040;
-  }
-</style>
-
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      color: #0f0;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+    #stats {
+      margin-top: 12px;
+      white-space: pre-line;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    button {
+      margin-top: 20px;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: 1px solid #0f0;
+      background: #020;
+      color: #0f0;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:active { background: #040; }
+  </style>
 </head>
 <body>
 
-<h1>D20 Multi-Core Streak Hunter</h1>
+<h1>D20 Multi-Core Streak Hunter (Turbo)</h1>
 <div id="stats">Ready.</div>
 <button id="startBtn">Start Rolling</button>
 
@@ -54,8 +48,15 @@
 ///////////////////////////////////////////////////////////////////////////////
 // CONFIG
 ///////////////////////////////////////////////////////////////////////////////
+
+// Target streak (10 twenties in a row)
 const TARGET_STREAK = 10;
-const WORKERS = 6;    // Increase to 6–8 if laptop can handle heat
+
+// Number of workers (CPU cores). Try 2–4 on an older laptop.
+// 4 = more speed but more heat / more chance for browser to throttle.
+const WORKERS = 4;
+
+// How often to update UI (ms)
 const UPDATE_MS = 1000;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -66,22 +67,21 @@ let running = false;
 
 let totalRolls = 0;
 let bestStreak = 0;
+
 let lastRolls = 0;
 let lastUpdate = 0;
-
-const histogram = {
-  1: 0, 2: 0, 3: 0, 4: 0, 5: 0,
-  6: 0, 7: 0, 8: 0, 9: 0, 10: 0
-};
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
 ///////////////////////////////////////////////////////////////////////////////
-// SETUP WORKERS
+// WORKER SETUP
 ///////////////////////////////////////////////////////////////////////////////
 function setupWorkers() {
-  workers.forEach(w => w.terminate());
+  // Kill any previous workers
+  for (const w of workers) {
+    try { w.terminate(); } catch (e) {}
+  }
   workers = [];
 
   for (let i = 0; i < WORKERS; i++) {
@@ -90,33 +90,37 @@ function setupWorkers() {
     w.onmessage = (e) => {
       const msg = e.data;
 
-      if (msg.type === "streak") {
-        histogram[msg.value]++;
-        return;
-      }
-
       if (msg.type === "progress") {
         totalRolls += msg.totalDelta;
-        if (msg.bestStreak > bestStreak) bestStreak = msg.bestStreak;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
         return;
       }
 
       if (msg.type === "hit") {
         totalRolls += msg.totalDelta;
-        if (msg.bestStreak > bestStreak) bestStreak = msg.bestStreak;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
 
-        running = false;
-        workers.forEach(w2 => w2.postMessage({ type: "stop" }));
+        if (running) {
+          running = false;
+          // Stop all workers
+          for (const other of workers) {
+            try { other.postMessage({ type: "stop" }); } catch (e) {}
+          }
 
-        alert(
-          `🎉 HIT ${TARGET_STREAK} twenties in a row!\n` +
-          `Total rolls: ${totalRolls.toLocaleString()}\n` +
-          `Best streak: ${bestStreak}`
-        );
+          alert(
+            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
+            "Total rolls (approx): " + totalRolls + "\n" +
+            "Best streak: " + bestStreak
+          );
 
-        updateStats(performance.now());
-        startBtn.disabled = false;
-        startBtn.textContent = "Start Again";
+          updateStats(performance.now());
+          startBtn.disabled = false;
+          startBtn.textContent = "Start Again";
+        }
       }
     };
 
@@ -125,7 +129,7 @@ function setupWorkers() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// UPDATE STATS UI
+// UI STATS
 ///////////////////////////////////////////////////////////////////////////////
 function updateStats(now) {
   const dt = (now - lastUpdate) / 1000;
@@ -137,22 +141,11 @@ function updateStats(now) {
   lastRolls = totalRolls;
   lastUpdate = now;
 
-  // Chance meter
-  const p = 1 / 20;
-  const p10 = Math.pow(p, 10);
-  const chanceSeen = 1 - Math.pow(1 - p10, totalRolls);
-  const percent = (chanceSeen * 100).toFixed(6);
-
   statsDiv.textContent =
-    `Total rolls: ${totalRolls.toLocaleString()}\n` +
-    `Speed: ${Math.round(rps).toLocaleString()} rolls/sec\n` +
-    `Best streak: ${bestStreak}\n` +
-    `Chance we should have seen a 10-streak: ${percent}%\n\n` +
-    `Streak Histogram:\n` +
-    `1: ${histogram[1]}   2: ${histogram[2]}   3: ${histogram[3]}\n` +
-    `4: ${histogram[4]}   5: ${histogram[5]}   6: ${histogram[6]}\n` +
-    `7: ${histogram[7]}   8: ${histogram[8]}   9: ${histogram[9]}\n` +
-    `10: ${histogram[10]}`;
+    "Total rolls: " + totalRolls + "\n" +
+    "Speed: " + Math.round(rps) + " rolls/sec\n" +
+    "Best streak: " + bestStreak + "\n" +
+    "(Workers: " + WORKERS + ")";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -163,21 +156,21 @@ function startRolling() {
 
   setupWorkers();
 
-  // Reset state
   totalRolls = 0;
   bestStreak = 0;
   lastRolls = 0;
   lastUpdate = performance.now();
-
-  for (let k in histogram) histogram[k] = 0;
-
   running = true;
 
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  workers.forEach(w => w.postMessage({ type: "start" }));
+  // Start all workers
+  for (const w of workers) {
+    w.postMessage({ type: "start" });
+  }
 
+  // UI loop – light so browser doesn't freak out
   (function loop() {
     if (!running) return;
     const now = performance.now();
