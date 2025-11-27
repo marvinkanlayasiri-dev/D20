@@ -1,83 +1,82 @@
 // worker.js
+// Ultra-optimized worker for d20 streak rolling
 
-// How many rolls this worker generates per batch.
-// Higher = faster but more heat; lower = smoother updates.
-const BATCH_SIZE = 900000;
+// How many rolls per inner batch (tight loop)
+const BATCH_SIZE = 900000; // try 900k–1.5M per worker
 
 let running = false;
-let localTotal = 0;
+let localTotalSinceLast = 0;
 let localBestStreak = 0;
 let localCurrentStreak = 0;
 
 const TARGET_STREAK = 10;
 
 function d20() {
-  return (Math.random() * 20) | 0; // 0–19
+  // 0–19, we treat 19 as "20"
+  return (Math.random() * 20) | 0;
 }
 
-function runBatch() {
+function runLoop() {
   if (!running) return;
 
-  let n = BATCH_SIZE;
-  while (n--) {
-    const roll = d20();
+  // Do several batches before reporting → fewer messages = more speed
+  const OUTER_BATCHES = 6; // 6 * 900k = 5.4M rolls per progress tick
 
-    if (roll === 19) {
-      localCurrentStreak++;
-    } else {
-      // Send completed streak to main (but capped at 10 for display)
-      if (localCurrentStreak > 0) {
-        postMessage({
-          type: "streak",
-          value: Math.min(localCurrentStreak, 10)
-        });
+  for (let b = 0; b < OUTER_BATCHES && running; b++) {
+    let n = BATCH_SIZE;
+    while (n--) {
+      const roll = d20();
+
+      if (roll === 19) {
+        localCurrentStreak++;
+        if (localCurrentStreak > localBestStreak) {
+          localBestStreak = localCurrentStreak;
+        }
+        if (localCurrentStreak >= TARGET_STREAK) {
+          // Tell main thread and stop completely
+          localTotalSinceLast++;
+          running = false;
+          postMessage({
+            type: "hit",
+            totalDelta: localTotalSinceLast,
+            bestStreak: localBestStreak
+          });
+          return;
+        }
+      } else {
+        localCurrentStreak = 0;
       }
-      localCurrentStreak = 0;
-    }
 
-    localTotal++;
-    if (localCurrentStreak > localBestStreak) {
-      localBestStreak = localCurrentStreak;
-    }
-
-    if (localCurrentStreak >= TARGET_STREAK) {
-      // Notify main we hit target
-      postMessage({
-        type: "hit",
-        totalDelta: localTotal,
-        bestStreak: localBestStreak
-      });
-      running = false;
-      return;
+      localTotalSinceLast++;
     }
   }
 
-  // Send progress update
-  postMessage({
-    type: "progress",
-    totalDelta: localTotal,
-    bestStreak: localBestStreak,
-    currentStreak: localCurrentStreak
-  });
+  // Send a single progress update for this chunk
+  if (localTotalSinceLast > 0) {
+    postMessage({
+      type: "progress",
+      totalDelta: localTotalSinceLast,
+      bestStreak: localBestStreak
+    });
+    localTotalSinceLast = 0;
+  }
 
-  localTotal = 0;
-
-  // Yield to browser
-  setTimeout(runBatch, 0);
+  // Yield back to the browser a tiny bit to avoid being flagged as hung
+  if (running) {
+    setTimeout(runLoop, 0);
+  }
 }
 
 onmessage = (e) => {
-  if (e.data.type === "start") {
+  const msg = e.data;
+  if (msg.type === "start") {
     if (running) return;
-
     running = true;
-    localTotal = 0;
+    localTotalSinceLast = 0;
     localBestStreak = 0;
     localCurrentStreak = 0;
-    runBatch();
-  }
-
-  if (e.data.type === "stop") {
+    runLoop();
+  } else if (msg.type === "stop") {
     running = false;
   }
 };
