@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>D20 GPU Streak Hunter</title>
+  <title>D20 Multi-Core Streak Hunter</title>
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
@@ -20,14 +20,12 @@
       font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
       text-align: center;
     }
-
     #stats {
       white-space: pre-line;
       line-height: 1.6;
       font-size: 1rem;
       margin-top: 0.5rem;
     }
-
     button {
       margin-top: 1.5rem;
       padding: 0.6rem 1rem;
@@ -38,252 +36,127 @@
       font-size: 1rem;
       cursor: pointer;
     }
-
-    button:active {
-      background: #040;
-    }
+    button:active { background: #040; }
   </style>
 </head>
 <body>
-  <h1>D20 GPU Streak Hunter</h1>
-  <div id="stats">Checking WebGPU support…</div>
-  <button id="startBtn" disabled>Start GPU Rolling</button>
+  <h1>D20 Multi-Core Streak Hunter</h1>
+  <div id="stats">Ready.</div>
+  <button id="startBtn">Start Rolling</button>
 
-<script type="module">
-///////////////////////////////////////////////////////////////////////////////
-// CONFIG
-///////////////////////////////////////////////////////////////////////////////
+<script>
 const TARGET_STREAK = 10;
-const ROLLS_PER_BATCH = 1_000_000; // 1M rolls per GPU dispatch
-const ROLLS_OFFSET = 8;            // bytes: seed (4) + pad (4)
+const WORKER_COUNT = 4;      // Try 2–4 depending on how hot your laptop gets
+const UPDATE_INTERVAL_MS = 1000; // update stats ~1×/sec
 
-///////////////////////////////////////////////////////////////////////////////
-// STATE
-///////////////////////////////////////////////////////////////////////////////
-let device, queue, pipeline, bindGroup, storageBuffer;
+let workers = [];
 let running = false;
 
-let currentStreak = 0;
-let bestStreak = 0;
 let totalRolls = 0;
-let batchSeed = 1;
+let bestStreak = 0;
+
+// for real speed calculation
+let lastTime = 0;
+let lastRolls = 0;
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
-///////////////////////////////////////////////////////////////////////////////
-// SHADER (WGSL) – FIXED RNG + CORRECT LAYOUT
-///////////////////////////////////////////////////////////////////////////////
-// We use a good hash-based RNG instead of a simple LCG
-const shaderCode = /* wgsl */ `
-struct Data {
-  seed : u32,
-  _pad : u32,
-  rolls: array<u32>,
-};
+function setupWorkers() {
+  // Kill old workers if any
+  workers.forEach(w => w.terminate());
+  workers = [];
 
-@group(0) @binding(0)
-var<storage, read_write> data : Data;
+  for (let i = 0; i < WORKER_COUNT; i++) {
+    const w = new Worker("worker.js");
+    w.onmessage = (e) => {
+      const msg = e.data;
 
-// Hash-based RNG with good distribution for parallel use
-fn hash_u32(x: u32) -> u32 {
-  var z = x + 0x9e3779b9u;
-  z = (z ^ (z >> 16u)) * 0x85ebca6bu;
-  z = (z ^ (z >> 13u)) * 0xc2b2ae35u;
-  return z ^ (z >> 16u);
+      if (msg.type === "progress") {
+        // Add this worker's delta
+        totalRolls += msg.totalDelta;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
+      } else if (msg.type === "hit") {
+        totalRolls += msg.totalDelta;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
+
+        if (running) {
+          running = false;
+          // Tell all workers to stop
+          workers.forEach(other => {
+            try { other.postMessage({ type: "stop" }); } catch (e) {}
+          });
+
+          alert(
+            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
+            "Total rolls (approx): " + totalRolls.toLocaleString() + "\n" +
+            "Best streak: " + bestStreak
+          );
+
+          // Final stats update
+          updateStats(performance.now());
+
+          startBtn.disabled = false;
+          startBtn.textContent = "Start Again";
+        }
+      }
+    };
+    workers.push(w);
+  }
 }
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let index = gid.x;
-  if (index >= ${ROLLS_PER_BATCH}u) {
-    return;
-  }
+function updateStats(now) {
+  const dt = (now - lastTime) / 1000;
+  if (dt <= 0) return;
 
-  // unique input per roll
-  let r = hash_u32(data.seed ^ index);
-
-  // d20: 0–19 (treat 19 as "20")
-  data.rolls[index] = r % 20u;
-}
-`;
-
-///////////////////////////////////////////////////////////////////////////////
-// INIT WEBGPU
-///////////////////////////////////////////////////////////////////////////////
-async function initWebGPU() {
-  if (!("gpu" in navigator)) {
-    statsDiv.textContent = "❌ WebGPU not supported.\nUse desktop Chrome/Edge.";
-    return;
-  }
-
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
-    statsDiv.textContent = "❌ No suitable GPU adapter found.";
-    return;
-  }
-
-  device = await adapter.requestDevice();
-  queue = device.queue;
-
-  const module = device.createShaderModule({ code: shaderCode });
-
-  pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: {
-      module,
-      entryPoint: "main"
-    }
-  });
-
-  // 8-byte header (seed + pad) + rolls
-  const bufferSize = ROLLS_OFFSET + ROLLS_PER_BATCH * 4;
-  storageBuffer = device.createBuffer({
-    size: bufferSize,
-    usage: GPUBufferUsage.STORAGE |
-           GPUBufferUsage.COPY_SRC |
-           GPUBufferUsage.COPY_DST
-  });
-
-  // initial seed
-  queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
-
-  bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: storageBuffer } }
-    ]
-  });
-
-  statsDiv.textContent = "✅ WebGPU ready.\nPress Start to begin.";
-  startBtn.disabled = false;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// ONE GPU BATCH
-///////////////////////////////////////////////////////////////////////////////
-async function runOneBatch() {
-  if (!running) return;
-
-  // Update seed each batch
-  batchSeed = (batchSeed + 1) >>> 0;
-  queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
-
-  const tStart = performance.now();
-
-  // 1) Compute pass: fill rolls buffer
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-
-  const WORKGROUP_SIZE = 256;
-  const numWorkgroups = Math.ceil(ROLLS_PER_BATCH / WORKGROUP_SIZE);
-  pass.dispatchWorkgroups(numWorkgroups);
-  pass.end();
-
-  queue.submit([encoder.finish()]);
-  await queue.onSubmittedWorkDone();
-
-  // 2) Copy only the rolls region into a read buffer
-  const readBuffer = device.createBuffer({
-    size: ROLLS_PER_BATCH * 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  });
-
-  const copyEncoder = device.createCommandEncoder();
-  copyEncoder.copyBufferToBuffer(
-    storageBuffer,
-    ROLLS_OFFSET,         // skip seed + pad
-    readBuffer,
-    0,
-    ROLLS_PER_BATCH * 4
-  );
-  queue.submit([copyEncoder.finish()]);
-
-  await readBuffer.mapAsync(GPUMapMode.READ);
-  const rolls = new Uint32Array(readBuffer.getMappedRange());
-
-  // 3) Process rolls on CPU
-  let processed = 0;
-  let found = false;
-
-  for (let i = 0; i < rolls.length; i++) {
-    const v = rolls[i]; // 0–19
-
-    if (v === 19) {
-      currentStreak++;
-    } else {
-      currentStreak = 0;
-    }
-
-    if (currentStreak > bestStreak) {
-      bestStreak = currentStreak;
-    }
-
-    processed++;
-    totalRolls++;
-
-    if (currentStreak >= TARGET_STREAK) {
-      found = true;
-      break; // stop at the first time we hit 10 in a row
-    }
-  }
-
-  readBuffer.unmap();
-
-  const tEnd = performance.now();
-  const dt = (tEnd - tStart) / 1000;
-  const rps = Math.round(processed / dt);
+  const deltaRolls = totalRolls - lastRolls;
+  const rps = deltaRolls / dt;
 
   statsDiv.textContent =
-    `Total rolls: ${totalRolls.toLocaleString()}\n` +
-    `Batch processed: ${processed.toLocaleString()} rolls\n` +
-    `Speed (real): ${rps.toLocaleString()} rolls/sec\n` +
-    `Current streak: ${currentStreak}\n` +
-    `Best streak: ${bestStreak}`;
+    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+    "Speed (real, all cores): " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
+    "Best streak: " + bestStreak + "\n" +
+    "(Workers: " + WORKER_COUNT + ")";
 
-  if (found) {
-    running = false;
-    alert(
-      `🎉 HIT ${TARGET_STREAK} twenties in a row!\n` +
-      `Total rolls: ${totalRolls.toLocaleString()}\n` +
-      `Best streak: ${bestStreak}`
-    );
-    return;
-  }
-
-  if (running) {
-    setTimeout(runOneBatch, 0);
-  }
+  lastTime = now;
+  lastRolls = totalRolls;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// BUTTON HANDLER
-///////////////////////////////////////////////////////////////////////////////
-startBtn.addEventListener("click", () => {
-  if (!device || running) return;
+function startRolling() {
+  if (running) return;
 
-  currentStreak = 0;
-  bestStreak = 0;
+  setupWorkers();
+
   totalRolls = 0;
-  batchSeed = 1;
+  bestStreak = 0;
+  lastRolls = 0;
+  lastTime = performance.now();
   running = true;
 
-  statsDiv.textContent = "Starting GPU batches…";
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  runOneBatch().finally(() => {
-    startBtn.disabled = false;
-    startBtn.textContent = "Start GPU Rolling";
-  });
-});
+  statsDiv.textContent = "Starting workers…";
 
-///////////////////////////////////////////////////////////////////////////////
-// START
-///////////////////////////////////////////////////////////////////////////////
-initWebGPU();
+  // Start workers
+  workers.forEach(w => w.postMessage({ type: "start" }));
+
+  // Stats loop on main thread
+  (function statsLoop() {
+    if (!running) return;
+    const now = performance.now();
+    if (now - lastTime >= UPDATE_INTERVAL_MS) {
+      updateStats(now);
+    }
+    requestAnimationFrame(statsLoop);
+  })();
+}
+
+startBtn.addEventListener("click", startRolling);
 </script>
 </body>
 </html>
