@@ -55,7 +55,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 const TARGET_STREAK = 10;
 const ROLLS_PER_BATCH = 1_000_000; // 1M rolls per GPU dispatch
-const ROLLS_OFFSET = 8;            // bytes (seed + pad)
+const ROLLS_OFFSET = 8;            // bytes: seed (4) + pad (4)
 
 ///////////////////////////////////////////////////////////////////////////////
 // STATE
@@ -63,7 +63,6 @@ const ROLLS_OFFSET = 8;            // bytes (seed + pad)
 let device, queue, pipeline, bindGroup, storageBuffer;
 let running = false;
 
-// streak state across batches
 let currentStreak = 0;
 let bestStreak = 0;
 let totalRolls = 0;
@@ -73,9 +72,9 @@ const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
 ///////////////////////////////////////////////////////////////////////////////
-// SHADER (WGSL)
-// We define a struct with explicit padding so the rolls array starts at offset 8
+// SHADER (WGSL) – FIXED RNG + CORRECT LAYOUT
 ///////////////////////////////////////////////////////////////////////////////
+// We use a good hash-based RNG instead of a simple LCG
 const shaderCode = /* wgsl */ `
 struct Data {
   seed : u32,
@@ -86,8 +85,12 @@ struct Data {
 @group(0) @binding(0)
 var<storage, read_write> data : Data;
 
-fn lcg_rand(x : u32) -> u32 {
-  return 1664525u * x + 1013904223u;
+// Hash-based RNG with good distribution for parallel use
+fn hash_u32(x: u32) -> u32 {
+  var z = x + 0x9e3779b9u;
+  z = (z ^ (z >> 16u)) * 0x85ebca6bu;
+  z = (z ^ (z >> 13u)) * 0xc2b2ae35u;
+  return z ^ (z >> 16u);
 }
 
 @compute @workgroup_size(256)
@@ -97,8 +100,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     return;
   }
 
-  let r = lcg_rand(data.seed ^ index);
-  data.rolls[index] = r % 20u; // 0–19
+  // unique input per roll
+  let r = hash_u32(data.seed ^ index);
+
+  // d20: 0–19 (treat 19 as "20")
+  data.rolls[index] = r % 20u;
 }
 `;
 
@@ -130,7 +136,7 @@ async function initWebGPU() {
     }
   });
 
-  // buffer size: 8 bytes header (seed + pad) + rolls
+  // 8-byte header (seed + pad) + rolls
   const bufferSize = ROLLS_OFFSET + ROLLS_PER_BATCH * 4;
   storageBuffer = device.createBuffer({
     size: bufferSize,
@@ -139,7 +145,7 @@ async function initWebGPU() {
            GPUBufferUsage.COPY_DST
   });
 
-  // init seed (not atomic, just per-batch)
+  // initial seed
   queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
 
   bindGroup = device.createBindGroup({
@@ -154,18 +160,18 @@ async function initWebGPU() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// ONE GPU BATCH (ASYNC)
+// ONE GPU BATCH
 ///////////////////////////////////////////////////////////////////////////////
 async function runOneBatch() {
   if (!running) return;
 
-  // write a new seed for this batch
+  // Update seed each batch
   batchSeed = (batchSeed + 1) >>> 0;
   queue.writeBuffer(storageBuffer, 0, new Uint32Array([batchSeed]));
 
   const tStart = performance.now();
 
-  // --- 1) Run compute shader to fill rolls buffer ---
+  // 1) Compute pass: fill rolls buffer
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
@@ -179,7 +185,7 @@ async function runOneBatch() {
   queue.submit([encoder.finish()]);
   await queue.onSubmittedWorkDone();
 
-  // --- 2) Copy GPU buffer (rolls part) to CPU-readable buffer ---
+  // 2) Copy only the rolls region into a read buffer
   const readBuffer = device.createBuffer({
     size: ROLLS_PER_BATCH * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
@@ -188,7 +194,7 @@ async function runOneBatch() {
   const copyEncoder = device.createCommandEncoder();
   copyEncoder.copyBufferToBuffer(
     storageBuffer,
-    ROLLS_OFFSET,           // skip seed + pad
+    ROLLS_OFFSET,         // skip seed + pad
     readBuffer,
     0,
     ROLLS_PER_BATCH * 4
@@ -196,10 +202,9 @@ async function runOneBatch() {
   queue.submit([copyEncoder.finish()]);
 
   await readBuffer.mapAsync(GPUMapMode.READ);
-  const view = readBuffer.getMappedRange();
-  const rolls = new Uint32Array(view);
+  const rolls = new Uint32Array(readBuffer.getMappedRange());
 
-  // --- 3) Process rolls on CPU, track streaks + total ---
+  // 3) Process rolls on CPU
   let processed = 0;
   let found = false;
 
@@ -221,19 +226,19 @@ async function runOneBatch() {
 
     if (currentStreak >= TARGET_STREAK) {
       found = true;
-      // we do NOT break, so we finish the batch cleanly
+      break; // stop at the first time we hit 10 in a row
     }
   }
 
   readBuffer.unmap();
 
   const tEnd = performance.now();
-  const dt = (tEnd - tStart) / 1000; // seconds for this whole batch
+  const dt = (tEnd - tStart) / 1000;
   const rps = Math.round(processed / dt);
 
   statsDiv.textContent =
     `Total rolls: ${totalRolls.toLocaleString()}\n` +
-    `Batch size: ${processed.toLocaleString()} rolls\n` +
+    `Batch processed: ${processed.toLocaleString()} rolls\n` +
     `Speed (real): ${rps.toLocaleString()} rolls/sec\n` +
     `Current streak: ${currentStreak}\n` +
     `Best streak: ${bestStreak}`;
@@ -249,7 +254,6 @@ async function runOneBatch() {
   }
 
   if (running) {
-    // small yield so browser stays happy
     setTimeout(runOneBatch, 0);
   }
 }
@@ -260,7 +264,6 @@ async function runOneBatch() {
 startBtn.addEventListener("click", () => {
   if (!device || running) return;
 
-  // reset global state
   currentStreak = 0;
   bestStreak = 0;
   totalRolls = 0;
@@ -278,7 +281,7 @@ startBtn.addEventListener("click", () => {
 });
 
 ///////////////////////////////////////////////////////////////////////////////
-// KICK OFF
+// START
 ///////////////////////////////////////////////////////////////////////////////
 initWebGPU();
 </script>
