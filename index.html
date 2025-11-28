@@ -45,29 +45,32 @@ button:active { background: #040; }
 <button id="startBtn">Start Rolling</button>
 
 <script>
-// CONFIG
-const TARGET_STREAK = 10;             // how many 20s in a row
-const WORKER_COUNT = 16;              // you were using 16 on iPad
-const UPDATE_INTERVAL_MS = 1000;      // stats refresh ~1/sec
+// ----------------------------------------
+// CONFIG (fixed duplicate variable bug)
+// ----------------------------------------
+const TARGET_STREAK = 10;
+const WORKER_COUNT = 16;
+const UPDATE_INTERVAL_MS = 1000;
 
+// ----------------------------------------
 // STATE
+// ----------------------------------------
 let workers = [];
 let running = false;
 
 let totalRolls = 0;
 let bestStreak = 0;
 
-// for speed measurement
 let lastTime = 0;
 let lastRolls = 0;
 
-// finished-streak histogram (1..10)
+// streak histogram (1–10)
 const streakHist = Array(11).fill(0);
 
 const statsDiv = document.getElementById("stats");
 const startBtn = document.getElementById("startBtn");
 
-// approximate probability of seeing at least one 10-streak
+// probability: at least 1 ten-streak so far
 function tenStreakChance(rolls) {
   const p = 1 / 20;
   const p10 = Math.pow(p, 10);
@@ -75,7 +78,6 @@ function tenStreakChance(rolls) {
 }
 
 function setupWorkers() {
-  // kill old workers if any
   workers.forEach(w => {
     try { w.terminate(); } catch (e) {}
   });
@@ -83,27 +85,22 @@ function setupWorkers() {
 
   for (let i = 0; i < WORKER_COUNT; i++) {
     const w = new Worker("worker.js");
+
     w.onmessage = (e) => {
       const msg = e.data;
 
       if (msg.type === "progress") {
-        // add this worker's progress
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
           bestStreak = msg.bestStreak;
         }
 
       } else if (msg.type === "streak") {
-        // a finished streak was reported
         const s = msg.value;
-        if (s >= 1 && s <= 10) {
-          streakHist[s]++;
-        } else if (s > 10) {
-          streakHist[10]++; // bucket 10+ into 10
-        }
+        if (s >= 1 && s <= 10) streakHist[s]++;
+        else if (s > 10) streakHist[10]++;
 
       } else if (msg.type === "hit") {
-        // hit target streak in this worker
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
           bestStreak = msg.bestStreak;
@@ -111,7 +108,6 @@ function setupWorkers() {
 
         if (running) {
           running = false;
-          // stop all workers
           workers.forEach(other => {
             try { other.postMessage({ type: "stop" }); } catch (e) {}
           });
@@ -122,13 +118,13 @@ function setupWorkers() {
             "Best streak: " + bestStreak
           );
 
-          // final stats update
           updateStats(performance.now());
           startBtn.disabled = false;
           startBtn.textContent = "Start Again";
         }
       }
     };
+
     workers.push(w);
   }
 }
@@ -143,23 +139,21 @@ function updateStats(now) {
   lastTime = now;
   lastRolls = totalRolls;
 
-  // chance to have seen at least one 10-streak by now
   const chance = tenStreakChance(totalRolls);
-  const chancePercent = (chance * 100).toFixed(6);
+  const chancePct = (chance * 100).toFixed(6);
 
-  const histLines =
+  const hist =
     "1: " + streakHist[1] + "   2: " + streakHist[2] + "   3: " + streakHist[3] + "\n" +
     "4: " + streakHist[4] + "   5: " + streakHist[5] + "   6: " + streakHist[6] + "\n" +
     "7: " + streakHist[7] + "   8: " + streakHist[8] + "   9: " + streakHist[9] + "\n" +
     "10+: " + streakHist[10];
 
   statsDiv.textContent =
-    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
-    "Speed: " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
+    "Total rolls: " + totalRolls.toLocaleString() + "\n" +
+    "Speed: " + Math.round(rps).toLocaleString() + " rolls/sec\n" +
     "Best streak: " + bestStreak + "\n" +
-    "Chance to have seen a 10-streak: " + chancePercent + "%\n" +
-    "\nStreak history (finished streak lengths):\n" +
-    histLines;
+    "Chance to have seen a 10-streak: " + chancePct + "%\n\n" +
+    "Streak history:\n" + hist;
 }
 
 function startRolling() {
@@ -167,28 +161,23 @@ function startRolling() {
 
   setupWorkers();
 
-  // reset state
   totalRolls = 0;
   bestStreak = 0;
   lastRolls = 0;
   lastTime = performance.now();
   streakHist.fill(0);
-  running = true;
 
+  running = true;
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  // start all workers
   workers.forEach(w => w.postMessage({ type: "start" }));
 
-  // lightweight stats loop
-  (function statsLoop() {
+  (function loop() {
     if (!running) return;
     const now = performance.now();
-    if (now - lastTime >= UPDATE_INTERVAL_MS) {
-      updateStats(now);
-    }
-    requestAnimationFrame(statsLoop);
+    if (now - lastTime >= UPDATE_INTERVAL_MS) updateStats(now);
+    requestAnimationFrame(loop);
   })();
 }
 
