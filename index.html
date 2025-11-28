@@ -1,84 +1,198 @@
-<div id="stats"></div>
-<div id="hist"></div>
-<div id="chance"></div>
-<button id="startBtn">Start</button>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>D20 Multi-Core Streak Hunter</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  color: #0f0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  text-align: center;
+}
+#stats {
+  white-space: pre-line;
+  line-height: 1.6;
+  font-size: 1rem;
+  margin-top: 0.5rem;
+}
+button {
+  margin-top: 1.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #0f0;
+  background: #020;
+  color: #0f0;
+  font-size: 1rem;
+  cursor: pointer;
+}
+button:active { background: #040; }
+</style>
+</head>
+<body>
+<h1>D20 Multi-Core Streak Hunter</h1>
+<div id="stats">Ready.</div>
+<button id="startBtn">Start Rolling</button>
 
 <script>
-const WORKERS = 16;   // keep your fast iPad setting
+// CONFIG
+const TARGET_STREAK = 10;             // how many 20s in a row
+const WORKER_COUNT = 16;              // you were using 16 on iPad
+const UPDATE_INTERVAL_MS = 1000;      // stats refresh ~1/sec
+
+// STATE
 let workers = [];
 let running = false;
 
 let totalRolls = 0;
 let bestStreak = 0;
 
-// streak histogram (for 1–10)
+// for speed measurement
+let lastTime = 0;
+let lastRolls = 0;
+
+// finished-streak histogram (1..10)
 const streakHist = Array(11).fill(0);
 
-function chance10(rolls) {
-  // probability at least one 10-streak occurs
-  const p = 1 / (20 ** 10);
-  return 1 - Math.pow(1 - p, rolls);
+const statsDiv = document.getElementById("stats");
+const startBtn = document.getElementById("startBtn");
+
+// approximate probability of seeing at least one 10-streak
+function tenStreakChance(rolls) {
+  const p = 1 / 20;
+  const p10 = Math.pow(p, 10);
+  return 1 - Math.pow(1 - p10, rolls);
 }
 
 function setupWorkers() {
-  workers.forEach(w => w.terminate());
+  // kill old workers if any
+  workers.forEach(w => {
+    try { w.terminate(); } catch (e) {}
+  });
   workers = [];
 
-  for (let i = 0; i < WORKERS; i++) {
+  for (let i = 0; i < WORKER_COUNT; i++) {
     const w = new Worker("worker.js");
     w.onmessage = (e) => {
       const msg = e.data;
 
       if (msg.type === "progress") {
-        totalRolls += msg.rolls;
-        if (msg.best > bestStreak) bestStreak = msg.best;
-      }
+        // add this worker's progress
+        totalRolls += msg.totalDelta;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
 
-      if (msg.type === "streak") {
+      } else if (msg.type === "streak") {
+        // a finished streak was reported
         const s = msg.value;
-        if (s >= 1 && s <= 10) streakHist[s]++;
-        if (s > 10) streakHist[10]++;
-      }
+        if (s >= 1 && s <= 10) {
+          streakHist[s]++;
+        } else if (s > 10) {
+          streakHist[10]++; // bucket 10+ into 10
+        }
 
-      if (msg.type === "hit10") {
-        totalRolls += msg.rolls;
-        if (msg.best > bestStreak) bestStreak = msg.best;
+      } else if (msg.type === "hit") {
+        // hit target streak in this worker
+        totalRolls += msg.totalDelta;
+        if (msg.bestStreak > bestStreak) {
+          bestStreak = msg.bestStreak;
+        }
 
-        alert("Hit 10 in a row!\nTotal rolls: " + totalRolls);
-        running = false;
-        workers.forEach(w => w.postMessage("stop"));
+        if (running) {
+          running = false;
+          // stop all workers
+          workers.forEach(other => {
+            try { other.postMessage({ type: "stop" }); } catch (e) {}
+          });
+
+          alert(
+            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
+            "Total rolls (approx): " + totalRolls.toLocaleString() + "\n" +
+            "Best streak: " + bestStreak
+          );
+
+          // final stats update
+          updateStats(performance.now());
+          startBtn.disabled = false;
+          startBtn.textContent = "Start Again";
+        }
       }
     };
     workers.push(w);
   }
 }
 
-document.getElementById("startBtn").onclick = () => {
+function updateStats(now) {
+  const dt = (now - lastTime) / 1000;
+  if (dt <= 0) return;
+
+  const deltaRolls = totalRolls - lastRolls;
+  const rps = deltaRolls / dt;
+
+  lastTime = now;
+  lastRolls = totalRolls;
+
+  // chance to have seen at least one 10-streak by now
+  const chance = tenStreakChance(totalRolls);
+  const chancePercent = (chance * 100).toFixed(6);
+
+  const histLines =
+    "1: " + streakHist[1] + "   2: " + streakHist[2] + "   3: " + streakHist[3] + "\n" +
+    "4: " + streakHist[4] + "   5: " + streakHist[5] + "   6: " + streakHist[6] + "\n" +
+    "7: " + streakHist[7] + "   8: " + streakHist[8] + "   9: " + streakHist[9] + "\n" +
+    "10+: " + streakHist[10];
+
+  statsDiv.textContent =
+    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+    "Speed: " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
+    "Best streak: " + bestStreak + "\n" +
+    "Chance to have seen a 10-streak: " + chancePercent + "%\n" +
+    "\nStreak history (finished streak lengths):\n" +
+    histLines;
+}
+
+function startRolling() {
   if (running) return;
 
   setupWorkers();
+
+  // reset state
   totalRolls = 0;
   bestStreak = 0;
+  lastRolls = 0;
+  lastTime = performance.now();
   streakHist.fill(0);
-
-  workers.forEach(w => w.postMessage("start"));
   running = true;
 
-  function loop() {
+  startBtn.disabled = true;
+  startBtn.textContent = "Running…";
+
+  // start all workers
+  workers.forEach(w => w.postMessage({ type: "start" }));
+
+  // lightweight stats loop
+  (function statsLoop() {
     if (!running) return;
+    const now = performance.now();
+    if (now - lastTime >= UPDATE_INTERVAL_MS) {
+      updateStats(now);
+    }
+    requestAnimationFrame(statsLoop);
+  })();
+}
 
-    document.getElementById("stats").textContent =
-      `Rolls: ${totalRolls}\nBest Streak: ${bestStreak}`;
-
-    document.getElementById("hist").textContent =
-      streakHist.map((v,i)=> i>0?`${i}: ${v}`:"").join("\n");
-
-    const ch = chance10(totalRolls);
-    document.getElementById("chance").textContent =
-      `Chance of 10 streak so far: ${(ch*100).toFixed(8)}%`;
-
-    setTimeout(loop, 1000);
-  }
-  loop();
-};
+startBtn.addEventListener("click", startRolling);
 </script>
+</body>
+</html>
