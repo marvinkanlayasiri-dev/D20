@@ -1,162 +1,84 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>D20 Multi-Core Streak Hunter</title>
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      background: #000;
-      color: #0f0;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-      text-align: center;
-    }
-    #stats {
-      white-space: pre-line;
-      line-height: 1.6;
-      font-size: 1rem;
-      margin-top: 0.5rem;
-    }
-    button {
-      margin-top: 1.5rem;
-      padding: 0.6rem 1rem;
-      border-radius: 8px;
-      border: 1px solid #0f0;
-      background: #020;
-      color: #0f0;
-      font-size: 1rem;
-      cursor: pointer;
-    }
-    button:active { background: #040; }
-  </style>
-</head>
-<body>
-  <h1>D20 Multi-Core Streak Hunter</h1>
-  <div id="stats">Ready.</div>
-  <button id="startBtn">Start Rolling</button>
+<div id="stats"></div>
+<div id="hist"></div>
+<div id="chance"></div>
+<button id="startBtn">Start</button>
 
 <script>
-const TARGET_STREAK = 12;
-const WORKER_COUNT = 16;      // Try 2–4 depending on how hot your laptop gets
-const UPDATE_INTERVAL_MS = 1000; // update stats ~1×/sec
-
+const WORKERS = 16;   // keep your fast iPad setting
 let workers = [];
 let running = false;
 
 let totalRolls = 0;
 let bestStreak = 0;
 
-// for real speed calculation
-let lastTime = 0;
-let lastRolls = 0;
+// streak histogram (for 1–10)
+const streakHist = Array(11).fill(0);
 
-const statsDiv = document.getElementById("stats");
-const startBtn = document.getElementById("startBtn");
+function chance10(rolls) {
+  // probability at least one 10-streak occurs
+  const p = 1 / (20 ** 10);
+  return 1 - Math.pow(1 - p, rolls);
+}
 
 function setupWorkers() {
-  // Kill old workers if any
   workers.forEach(w => w.terminate());
   workers = [];
 
-  for (let i = 0; i < WORKER_COUNT; i++) {
+  for (let i = 0; i < WORKERS; i++) {
     const w = new Worker("worker.js");
     w.onmessage = (e) => {
       const msg = e.data;
 
       if (msg.type === "progress") {
-        // Add this worker's delta
-        totalRolls += msg.totalDelta;
-        if (msg.bestStreak > bestStreak) {
-          bestStreak = msg.bestStreak;
-        }
-      } else if (msg.type === "hit") {
-        totalRolls += msg.totalDelta;
-        if (msg.bestStreak > bestStreak) {
-          bestStreak = msg.bestStreak;
-        }
+        totalRolls += msg.rolls;
+        if (msg.best > bestStreak) bestStreak = msg.best;
+      }
 
-        if (running) {
-          running = false;
-          // Tell all workers to stop
-          workers.forEach(other => {
-            try { other.postMessage({ type: "stop" }); } catch (e) {}
-          });
+      if (msg.type === "streak") {
+        const s = msg.value;
+        if (s >= 1 && s <= 10) streakHist[s]++;
+        if (s > 10) streakHist[10]++;
+      }
 
-          alert(
-            "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
-            "Total rolls (approx): " + totalRolls.toLocaleString() + "\n" +
-            "Best streak: " + bestStreak
-          );
+      if (msg.type === "hit10") {
+        totalRolls += msg.rolls;
+        if (msg.best > bestStreak) bestStreak = msg.best;
 
-          // Final stats update
-          updateStats(performance.now());
-
-          startBtn.disabled = false;
-          startBtn.textContent = "Start Again";
-        }
+        alert("Hit 10 in a row!\nTotal rolls: " + totalRolls);
+        running = false;
+        workers.forEach(w => w.postMessage("stop"));
       }
     };
     workers.push(w);
   }
 }
 
-function updateStats(now) {
-  const dt = (now - lastTime) / 1000;
-  if (dt <= 0) return;
-
-  const deltaRolls = totalRolls - lastRolls;
-  const rps = deltaRolls / dt;
-
-  statsDiv.textContent =
-    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
-    "Speed (real, all cores): " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
-    "Best streak: " + bestStreak + "\n" +
-    "(Workers: " + WORKER_COUNT + ")";
-
-  lastTime = now;
-  lastRolls = totalRolls;
-}
-
-function startRolling() {
+document.getElementById("startBtn").onclick = () => {
   if (running) return;
 
   setupWorkers();
-
   totalRolls = 0;
   bestStreak = 0;
-  lastRolls = 0;
-  lastTime = performance.now();
+  streakHist.fill(0);
+
+  workers.forEach(w => w.postMessage("start"));
   running = true;
 
-  startBtn.disabled = true;
-  startBtn.textContent = "Running…";
-
-  statsDiv.textContent = "Starting workers…";
-
-  // Start workers
-  workers.forEach(w => w.postMessage({ type: "start" }));
-
-  // Stats loop on main thread
-  (function statsLoop() {
+  function loop() {
     if (!running) return;
-    const now = performance.now();
-    if (now - lastTime >= UPDATE_INTERVAL_MS) {
-      updateStats(now);
-    }
-    requestAnimationFrame(statsLoop);
-  })();
-}
 
-startBtn.addEventListener("click", startRolling);
+    document.getElementById("stats").textContent =
+      `Rolls: ${totalRolls}\nBest Streak: ${bestStreak}`;
+
+    document.getElementById("hist").textContent =
+      streakHist.map((v,i)=> i>0?`${i}: ${v}`:"").join("\n");
+
+    const ch = chance10(totalRolls);
+    document.getElementById("chance").textContent =
+      `Chance of 10 streak so far: ${(ch*100).toFixed(8)}%`;
+
+    setTimeout(loop, 1000);
+  }
+  loop();
+};
 </script>
-</body>
-</html>
