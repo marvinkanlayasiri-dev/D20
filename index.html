@@ -63,14 +63,11 @@ var bestStreak = 0;
 var lastTime = 0;
 var lastRolls = 0;
 
-// Only track streaks 5,6,7,8,9,10+
+// Track ONLY 8+, 9+, 10+ streaks
 var streakHist = {
-  5: 0,
-  6: 0,
-  7: 0,
   8: 0,
   9: 0,
-  10: 0 // 10+ goes here
+  10: 0 // 10+
 };
 
 var statsDiv = document.getElementById("stats");
@@ -108,11 +105,11 @@ function setupWorkers() {
 
       } else if (msg.type === "streak") {
         var s = msg.value;
-        if ( s >= 5 && s <= 9 ) {
-          streakHist[s]++;
-        } else if (s >= 10) {
-          streakHist[10]++;
-        }
+
+        // Only track streaks >= 8
+        if (s === 8) streakHist[8]++;
+        else if (s === 9) streakHist[9]++;
+        else if (s >= 10) streakHist[10]++;
 
       } else if (msg.type === "hit") {
         totalRolls += msg.totalDelta;
@@ -160,9 +157,6 @@ function updateStats(now) {
   var chancePct = (chance * 100).toFixed(6);
 
   var hist =
-    "5: " + streakHist[5] + "\n" +
-    "6: " + streakHist[6] + "\n" +
-    "7: " + streakHist[7] + "\n" +
     "8: " + streakHist[8] + "\n" +
     "9: " + streakHist[9] + "\n" +
     "10+: " + streakHist[10];
@@ -172,7 +166,7 @@ function updateStats(now) {
     "Speed: " + Math.round(rps).toLocaleString() + " rolls/sec\n" +
     "Best streak: " + bestStreak + "\n" +
     "Chance to have seen a 10-streak: " + chancePct + "%\n\n" +
-    "Streak history (5+):\n" + hist;
+    "Streak history (8+):\n" + hist;
 }
 
 // -----------------------------------------------------------
@@ -188,9 +182,6 @@ function startRolling() {
   lastRolls = 0;
   lastTime = performance.now();
 
-  streakHist[5] = 0;
-  streakHist[6] = 0;
-  streakHist[7] = 0;
   streakHist[8] = 0;
   streakHist[9] = 0;
   streakHist[10] = 0;
