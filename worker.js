@@ -1,8 +1,8 @@
-// worker.js
-// Turbo multi-core d20 roller with minimal extra messaging
+// worker.js — Safari-safe turbo version
 
-const BATCH_SIZE = 1500000;   // you can tweak this
-const OUTER_BATCHES = 6;     // inner loops before reporting
+// Smaller batch size prevents per-loop CPU spikes
+const BATCH_SIZE = 600000;    // was 1.5M — too large for Safari
+const OUTER_BATCHES = 6;
 
 let running = false;
 let localTotalSinceLast = 0;
@@ -11,8 +11,8 @@ let localCurrentStreak = 0;
 
 const TARGET_STREAK = 10;
 
+// Super-fast d20 generator
 function d20() {
-  // 0–19, treat 19 as rolling a 20
   return (Math.random() * 20) | 0;
 }
 
@@ -21,17 +21,25 @@ function runLoop() {
 
   for (let b = 0; b < OUTER_BATCHES && running; b++) {
     let n = BATCH_SIZE;
+
     while (n--) {
+
+      // --- SAFARI MICRO-YIELD PROTECTION ---
+      // Every ~200k iterations, give Safari a tiny breathing gap
+      if ((n & 0x2FFFF) === 0) {  
+        if (!running) return;
+      }
+      // --------------------------------------
+
       const roll = d20();
 
       if (roll === 19) {
-        // extend current streak
         localCurrentStreak++;
         if (localCurrentStreak > localBestStreak) {
           localBestStreak = localCurrentStreak;
         }
+
         if (localCurrentStreak >= TARGET_STREAK) {
-          // reached target streak: notify main & stop
           localTotalSinceLast++;
           running = false;
           postMessage({
@@ -41,8 +49,8 @@ function runLoop() {
           });
           return;
         }
+
       } else {
-        // streak broke; report finished streak (if any)
         if (localCurrentStreak > 0) {
           postMessage({
             type: "streak",
@@ -56,7 +64,7 @@ function runLoop() {
     }
   }
 
-  // report progress for this chunk
+  // Report chunk of rolls
   if (localTotalSinceLast > 0) {
     postMessage({
       type: "progress",
@@ -67,20 +75,25 @@ function runLoop() {
   }
 
   if (running) {
-    // tiny yield so browser stays responsive
-    setTimeout(runLoop, 0);
+    // SAFARI-FRIENDLY YIELD  
+    // 1ms timeout prevents WebKit watchdog crash
+    setTimeout(runLoop, 1);
   }
 }
 
 onmessage = (e) => {
   const msg = e.data;
+
   if (msg.type === "start") {
     if (running) return;
+
     running = true;
     localTotalSinceLast = 0;
     localBestStreak = 0;
     localCurrentStreak = 0;
+
     runLoop();
+
   } else if (msg.type === "stop") {
     running = false;
   }
