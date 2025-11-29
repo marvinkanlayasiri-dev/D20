@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>D20 Multi-Core Streak Hunter</title>
+
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <style>
@@ -39,78 +40,44 @@
   </style>
 </head>
 <body>
-<h1>D20 Multi-Core Streak Hunter</h1>
-<div id="stats">Ready.</div>
-<button id="startBtn">Start Rolling</button>
+  <h1>D20 Multi-Core Streak Hunter</h1>
+  <div id="stats">Ready.</div>
+  <button id="startBtn">Start Rolling</button>
 
 <script>
-// -----------------------------------------------------------
-// CONFIG
-// -----------------------------------------------------------
-var TARGET_STREAK = 10;
-var WORKER_COUNT = 6;
-var UPDATE_INTERVAL_MS = 1000;
+const TARGET_STREAK = 10;
+const WORKER_COUNT = 4;      // Try 2–4 depending on how hot your laptop gets
+const UPDATE_INTERVAL_MS = 1000; // update stats ~1×/sec
 
-// -----------------------------------------------------------
-// STATE
-// -----------------------------------------------------------
-var workers = [];
-var running = false;
+let workers = [];
+let running = false;
 
-var totalRolls = 0;
-var bestStreak = 0;
+let totalRolls = 0;
+let bestStreak = 0;
 
-var lastTime = 0;
-var lastRolls = 0;
+// for real speed calculation
+let lastTime = 0;
+let lastRolls = 0;
 
-// Track ONLY 8+, 9+, 10+ streaks
-var streakHist = {
-  8: 0,
-  9: 0,
-  10: 0 // 10+
-};
+const statsDiv = document.getElementById("stats");
+const startBtn = document.getElementById("startBtn");
 
-var statsDiv = document.getElementById("stats");
-var startBtn = document.getElementById("startBtn");
-
-// -----------------------------------------------------------
-// Chance of at least one 10-streak by now
-// -----------------------------------------------------------
-function tenStreakChance(rolls) {
-  if (rolls <= 0) return 0;
-  var p10 = Math.pow(1/20, 10);
-  return 1 - Math.pow(1 - p10, rolls);
-}
-
-// -----------------------------------------------------------
-// SETUP WORKERS
-// -----------------------------------------------------------
 function setupWorkers() {
-  for (var i = 0; i < workers.length; i++) {
-    try { workers[i].terminate(); } catch (e) {}
-  }
+  // Kill old workers if any
+  workers.forEach(w => w.terminate());
   workers = [];
 
-  for (var i = 0; i < WORKER_COUNT; i++) {
-    var w = new Worker("worker.js");
-
-    w.onmessage = function(e) {
-      var msg = e.data;
+  for (let i = 0; i < WORKER_COUNT; i++) {
+    const w = new Worker("worker.js");
+    w.onmessage = (e) => {
+      const msg = e.data;
 
       if (msg.type === "progress") {
+        // Add this worker's delta
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
           bestStreak = msg.bestStreak;
         }
-
-      } else if (msg.type === "streak") {
-        var s = msg.value;
-
-        // Only track streaks >= 8
-        if (s === 8) streakHist[8]++;
-        else if (s === 9) streakHist[9]++;
-        else if (s >= 10) streakHist[10]++;
-
       } else if (msg.type === "hit") {
         totalRolls += msg.totalDelta;
         if (msg.bestStreak > bestStreak) {
@@ -119,9 +86,10 @@ function setupWorkers() {
 
         if (running) {
           running = false;
-          for (var j = 0; j < workers.length; j++) {
-            try { workers[j].postMessage({ type: "stop" }); } catch (e) {}
-          }
+          // Tell all workers to stop
+          workers.forEach(other => {
+            try { other.postMessage({ type: "stop" }); } catch (e) {}
+          });
 
           alert(
             "🎉 HIT " + TARGET_STREAK + " twenties in a row!\n" +
@@ -129,49 +97,35 @@ function setupWorkers() {
             "Best streak: " + bestStreak
           );
 
+          // Final stats update
           updateStats(performance.now());
+
           startBtn.disabled = false;
           startBtn.textContent = "Start Again";
         }
       }
     };
-
     workers.push(w);
   }
 }
 
-// -----------------------------------------------------------
-// UPDATE STATS TEXT
-// -----------------------------------------------------------
 function updateStats(now) {
-  var dt = (now - lastTime) / 1000;
+  const dt = (now - lastTime) / 1000;
   if (dt <= 0) return;
 
-  var deltaRolls = totalRolls - lastRolls;
-  var rps = deltaRolls / dt;
+  const deltaRolls = totalRolls - lastRolls;
+  const rps = deltaRolls / dt;
+
+  statsDiv.textContent =
+    "Total rolls: " + totalRolls.toLocaleString("en-US") + "\n" +
+    "Speed (real, all cores): " + Math.round(rps).toLocaleString("en-US") + " rolls/sec\n" +
+    "Best streak: " + bestStreak + "\n" +
+    "(Workers: " + WORKER_COUNT + ")";
 
   lastTime = now;
   lastRolls = totalRolls;
-
-  var chance = tenStreakChance(totalRolls);
-  var chancePct = (chance * 100).toFixed(6);
-
-  var hist =
-    "8: " + streakHist[8] + "\n" +
-    "9: " + streakHist[9] + "\n" +
-    "10+: " + streakHist[10];
-
-  statsDiv.textContent =
-    "Total rolls: " + totalRolls.toLocaleString() + "\n" +
-    "Speed: " + Math.round(rps).toLocaleString() + " rolls/sec\n" +
-    "Best streak: " + bestStreak + "\n" +
-    "Chance to have seen a 10-streak: " + chancePct + "%\n\n" +
-    "Streak history (8+):\n" + hist;
 }
 
-// -----------------------------------------------------------
-// START ROLLING
-// -----------------------------------------------------------
 function startRolling() {
   if (running) return;
 
@@ -181,26 +135,24 @@ function startRolling() {
   bestStreak = 0;
   lastRolls = 0;
   lastTime = performance.now();
-
-  streakHist[8] = 0;
-  streakHist[9] = 0;
-  streakHist[10] = 0;
-
   running = true;
+
   startBtn.disabled = true;
   startBtn.textContent = "Running…";
 
-  for (var i = 0; i < workers.length; i++) {
-    workers[i].postMessage({ type: "start" });
-  }
+  statsDiv.textContent = "Starting workers…";
 
-  (function loop() {
+  // Start workers
+  workers.forEach(w => w.postMessage({ type: "start" }));
+
+  // Stats loop on main thread
+  (function statsLoop() {
     if (!running) return;
-    var now = performance.now();
+    const now = performance.now();
     if (now - lastTime >= UPDATE_INTERVAL_MS) {
       updateStats(now);
     }
-    requestAnimationFrame(loop);
+    requestAnimationFrame(statsLoop);
   })();
 }
 
